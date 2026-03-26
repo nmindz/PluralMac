@@ -236,19 +236,6 @@ final class InstanceViewModel {
         logger.info("Successfully launched instance: \(instance.name) (PID: \(process.processIdentifier))")
     }
     
-    /// Check if an instance is currently running
-    func isInstanceRunning(_ instance: AppInstance) -> Bool {
-        // Check synchronously - we need to make this async-safe
-        var isRunning = false
-        let semaphore = DispatchSemaphore(value: 0)
-        Task {
-            isRunning = await directLauncher.isRunning(instance.id)
-            semaphore.signal()
-        }
-        semaphore.wait()
-        return isRunning
-    }
-    
     /// Terminate a running instance
     func terminateInstance(_ instance: AppInstance) async -> Bool {
         logger.info("Terminating instance: \(instance.name)")

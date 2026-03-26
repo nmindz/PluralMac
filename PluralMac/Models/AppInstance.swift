@@ -127,19 +127,31 @@ struct AppInstance: Identifiable, Codable, Hashable, Sendable {
         FileManager.default.fileExists(atPath: dataPath.path)
     }
     
+    /// Environment variable names that must never be set by user-provided config.
+    /// These could alter process loading, library resolution, or escalate privilege.
+    private static let deniedEnvironmentVariablePrefixes = ["DYLD_", "LD_", "CFNETWORK_"]
+    private static let deniedEnvironmentVariableNames: Set<String> = [
+        "PATH", "SHELL", "USER", "LOGNAME", "TMPDIR",
+        "NSUnbufferedIO", "COMMAND_MODE", "TERM_PROGRAM",
+    ]
+
     /// Get the complete environment variables including HOME override if needed
     var effectiveEnvironmentVariables: [String: String] {
-        var env = environmentVariables
-        
+        var env = environmentVariables.filter { key, _ in
+            let isDeniedPrefix = Self.deniedEnvironmentVariablePrefixes.contains { key.hasPrefix($0) }
+            let isDeniedName = Self.deniedEnvironmentVariableNames.contains(key)
+            return !isDeniedPrefix && !isDeniedName
+        }
+
         // Always redirect HOME for complete isolation
         // This ensures apps that hardcode paths still work
         env["HOME"] = dataPath.path
-        
+
         // Also set XDG directories for apps that use them
         env["XDG_CONFIG_HOME"] = dataPath.appendingPathComponent(".config").path
         env["XDG_DATA_HOME"] = dataPath.appendingPathComponent(".local/share").path
         env["XDG_CACHE_HOME"] = dataPath.appendingPathComponent(".cache").path
-        
+
         return env
     }
     
