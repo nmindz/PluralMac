@@ -57,6 +57,9 @@ struct AppInstance: Identifiable, Codable, Hashable, Sendable {
     
     /// Optional notes/description for this instance
     var notes: String?
+
+    /// Whether this instance was created with data migrated from the primary app
+    var migratedFromPrimary: Bool
     
     /// Creation date
     let createdAt: Date
@@ -103,7 +106,8 @@ struct AppInstance: Identifiable, Codable, Hashable, Sendable {
         self.eraseDataOnQuit = false
         self.showMenuBarIcon = false
         self.notes = nil
-        
+        self.migratedFromPrimary = false
+
         // Timestamps
         self.createdAt = Date()
         self.modifiedAt = Date()
@@ -284,9 +288,33 @@ extension AppInstance {
         case isolationMethodOverride
         case eraseDataOnQuit
         case showMenuBarIcon
+        case migratedFromPrimary
+        case notes
         case createdAt
         case modifiedAt
         case lastLaunchedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        targetBundleIdentifier = try container.decode(String.self, forKey: .targetBundleIdentifier)
+        targetAppPath = try container.decode(URL.self, forKey: .targetAppPath)
+        targetAppType = try container.decode(AppType.self, forKey: .targetAppType)
+        shortcutPath = try container.decode(URL.self, forKey: .shortcutPath)
+        dataPath = try container.decode(URL.self, forKey: .dataPath)
+        environmentVariables = try container.decode([String: String].self, forKey: .environmentVariables)
+        commandLineArguments = try container.decode([String].self, forKey: .commandLineArguments)
+        customIconPath = try container.decodeIfPresent(URL.self, forKey: .customIconPath)
+        isolationMethodOverride = try container.decodeIfPresent(DataIsolationMethod.self, forKey: .isolationMethodOverride)
+        eraseDataOnQuit = try container.decode(Bool.self, forKey: .eraseDataOnQuit)
+        showMenuBarIcon = try container.decode(Bool.self, forKey: .showMenuBarIcon)
+        migratedFromPrimary = try container.decodeIfPresent(Bool.self, forKey: .migratedFromPrimary) ?? false
+        notes = try container.decodeIfPresent(String.self, forKey: .notes)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        modifiedAt = try container.decode(Date.self, forKey: .modifiedAt)
+        lastLaunchedAt = try container.decodeIfPresent(Date.self, forKey: .lastLaunchedAt)
     }
 }
 

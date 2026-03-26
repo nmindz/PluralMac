@@ -1,17 +1,13 @@
-//
-//  .gitignore
-//  PluralMac
-//
-//  Created by Rafael Alexander Mejia Blanco on 4/2/26.
-//
-// User settings
+# .gitignore — PluralMac
+
+# User settings
 xcuserdata/
 
-// Compatibility with Xcode 8 and earlier (ignoring not required starting Xcode 9)
+# Xcode 8 and earlier
 *.xcscmblueprint
 *.xccheckout
 
-// Compatibility with Xcode 3 and earlier (ignoring not required starting Xcode 4)
+# Xcode build artifacts
 build/
 DerivedData/
 *.moved-aside
@@ -24,37 +20,36 @@ DerivedData/
 *.perspectivev3
 !default.perspectivev3
 
-// Obj-C/Swift specific
+# Obj-C/Swift specific
 *.hmap
 
-// App packaging
-*.ipa
+# App packaging
 *.ipa
 *.dSYM.zip
 *.dSYM
 
-// Playgrounds
+# Playgrounds
 timeline.xctimeline
 playground.xcworkspace
 
-// Swift Package Manager
+# Swift Package Manager
 .build/
 .swiftpm/
 
-// CocoaPods
+# CocoaPods
 Pods/
 
-// Carthage
+# Carthage
 Carthage/Build/
 
-// Accidental .DS_Store
+# macOS
 .DS_Store
 
-// Fastlane
+# Fastlane
 fastlane/report.xml
 fastlane/Preview.html
 fastlane/screenshots/**/*.png
 fastlane/test_output
 
-// Code Injection
+# Code Injection
 iOSInjectionProject/

@@ -34,12 +34,17 @@ final class InstanceViewModel {
     
     /// Whether to show error alert
     var showError: Bool = false
+
+    /// Migration state
+    var isMigrating: Bool = false
+    var migrationProgress: MigrationProgress?
     
     // MARK: - Private Properties
     
     private let logger = Logger(subsystem: "com.mtech.PluralMac", category: "InstanceViewModel")
     private let store = InstanceStore.shared
     private let directLauncher = DirectLauncher.shared
+    private let migrationService = DataMigrationService.shared
     
     // MARK: - Computed Properties
     
@@ -105,25 +110,82 @@ final class InstanceViewModel {
         application: Application,
         environmentVariables: [String: String] = [:],
         arguments: [String] = [],
-        customIconPath: URL? = nil
+        customIconPath: URL? = nil,
+        migrateFromPrimary: Bool = false,
+        migrationSources: [DataSource] = []
     ) async throws -> AppInstance {
         logger.info("Creating instance: \(name) for \(application.name)")
-        
+
         // Create the instance model
         var instance = AppInstance(name: name, application: application)
         instance.environmentVariables = environmentVariables
         instance.commandLineArguments = arguments
         instance.customIconPath = customIconPath
-        
-        // No bundle creation needed - we launch directly!
-        // Just save to storage
+
+        // Migrate data from primary app if requested
+        if migrateFromPrimary, !migrationSources.isEmpty {
+            instance.migratedFromPrimary = true
+
+            isMigrating = true
+            migrationProgress = nil
+            defer {
+                isMigrating = false
+                migrationProgress = nil
+            }
+
+            try await migrationService.migrate(
+                sources: migrationSources,
+                to: instance,
+                bundleIdentifier: application.bundleIdentifier,
+                appName: application.name
+            ) { [weak self] progress in
+                Task { @MainActor in
+                    self?.migrationProgress = progress
+                }
+            }
+        }
+
+        // Save to storage
         try await store.addInstance(instance)
-        
+
         // Update local list
         instances.append(instance)
-        
+
         logger.info("Successfully created instance: \(name)")
         return instance
+    }
+
+    /// Discover data sources available for migration from the primary app.
+    nonisolated func discoverMigrationSources(for application: Application) -> [DataSource] {
+        ElectronDataLocator.locateDataSources(for: application)
+    }
+
+    /// Migrate data from the primary app into an existing instance.
+    func migrateInstance(_ instance: AppInstance, sources: [DataSource]) async throws {
+        let app = try Application(from: instance.targetAppPath)
+
+        isMigrating = true
+        migrationProgress = nil
+        defer {
+            isMigrating = false
+            migrationProgress = nil
+        }
+
+        try await migrationService.migrate(
+            sources: sources,
+            to: instance,
+            bundleIdentifier: instance.targetBundleIdentifier,
+            appName: app.name
+        ) { [weak self] progress in
+            Task { @MainActor in
+                self?.migrationProgress = progress
+            }
+        }
+
+        var updated = instance
+        updated.migratedFromPrimary = true
+        updated.touch()
+        try await updateInstance(updated)
     }
     
     // MARK: - Instance Updates

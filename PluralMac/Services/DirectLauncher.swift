@@ -53,8 +53,11 @@ actor DirectLauncher {
             throw DirectLaunchError.appNotFound(targetAppPath)
         }
         
-        // Ensure data directory exists
-        try await ensureDataDirectoryExists(dataPath: dataPath)
+        // Ensure data directory exists.
+        // Only build the full HOME container (symlinks, Library dirs) for HOME redirection.
+        // For --user-data-dir isolation the data path is used directly by the app.
+        let isolationMethod = instance.effectiveIsolationMethod
+        try await ensureDataDirectoryExists(dataPath: dataPath, homeRedirection: isolationMethod == .homeRedirection)
         
         // Launch using NSWorkspace - use continuation for callback-based API
         let runningApp: NSRunningApplication = try await withCheckedThrowingContinuation { continuation in
@@ -181,7 +184,7 @@ actor DirectLauncher {
     }
     
     /// Ensure the data directory exists with proper structure
-    private func ensureDataDirectoryExists(dataPath: URL) async throws {
+    private func ensureDataDirectoryExists(dataPath: URL, homeRedirection: Bool) async throws {
         // Create data directory if it doesn't exist
         if !fileManager.fileExists(atPath: dataPath.path) {
             try fileManager.createDirectory(
@@ -190,11 +193,14 @@ actor DirectLauncher {
             )
             logger.debug("Created data directory: \(dataPath.path)")
         }
-        
+
+        // For --user-data-dir isolation the app reads/writes directly in dataPath.
+        // Do NOT create symlinks or Library structure — that would corrupt the flat layout.
+        guard homeRedirection else { return }
+
         // Create essential symlinks for HOME redirection
         let homeDirectory = fileManager.homeDirectoryForCurrentUser
-        
-        // User folders - link to real locations
+
         let symlinks: [(String, String)] = [
             ("Desktop", "Desktop"),
             ("Documents", "Documents"),
@@ -205,26 +211,23 @@ actor DirectLauncher {
             ("Public", "Public"),
             ("Library/Keychains", "Library/Keychains"),
         ]
-        
+
         for (relativePath, targetRelativePath) in symlinks {
             let linkPath = dataPath.appendingPathComponent(relativePath)
             let targetPath = homeDirectory.appendingPathComponent(targetRelativePath)
-            
-            // Create parent directory if needed
+
             let parentDir = linkPath.deletingLastPathComponent()
             if !fileManager.fileExists(atPath: parentDir.path) {
                 try fileManager.createDirectory(at: parentDir, withIntermediateDirectories: true)
             }
-            
-            // Create symlink if target exists and link doesn't
+
             if fileManager.fileExists(atPath: targetPath.path) &&
                !fileManager.fileExists(atPath: linkPath.path) {
                 try fileManager.createSymbolicLink(at: linkPath, withDestinationURL: targetPath)
                 logger.debug("Created symlink: \(relativePath) -> \(targetPath.path)")
             }
         }
-        
-        // Create Library subdirectories
+
         let libraryPaths = [
             "Library",
             "Library/Application Support",
@@ -232,7 +235,7 @@ actor DirectLauncher {
             "Library/Preferences",
             "Library/Logs"
         ]
-        
+
         for path in libraryPaths {
             let fullPath = dataPath.appendingPathComponent(path)
             if !fileManager.fileExists(atPath: fullPath.path) {

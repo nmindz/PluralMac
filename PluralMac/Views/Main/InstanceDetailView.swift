@@ -25,6 +25,9 @@ struct InstanceDetailView: View {
     @State private var showExportSheet = false
     @State private var showDuplicateSheet = false
     @State private var duplicateName: String = ""
+    @State private var showMigrationSheet = false
+    @State private var isExportingData = false
+    @State private var exportError: String?
     
     @ObservedObject private var runningManager = RunningInstancesManager.shared
     
@@ -102,6 +105,9 @@ struct InstanceDetailView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Do you want to delete just the shortcut, or also delete all isolated data?")
+        }
+        .sheet(isPresented: $showMigrationSheet) {
+            MigrationSheetView(instance: instance, viewModel: viewModel)
         }
         .alert("Duplicate Instance", isPresented: $showDuplicateSheet) {
             TextField("New Name", text: $duplicateName)
@@ -312,7 +318,15 @@ struct InstanceDetailView: View {
                 Button {
                     viewModel.revealDataInFinder(instance)
                 } label: {
-                    Label("Show Data in Finder", systemImage: "folder.badge.gearshape")
+                    Label("Show Instance Data in Finder", systemImage: "folder.badge.gearshape")
+                }
+
+                if instance.targetAppType == .electron || instance.targetAppType == .toDesktop {
+                    Button {
+                        revealPrimaryDataInFinder()
+                    } label: {
+                        Label("Show Primary App Data in Finder", systemImage: "folder.badge.person.crop")
+                    }
                 }
             } label: {
                 Label("Finder", systemImage: "folder")
@@ -341,9 +355,34 @@ struct InstanceDetailView: View {
                 } label: {
                     Label("Export...", systemImage: "square.and.arrow.up")
                 }
-                
+
+                if instance.targetAppType == .electron || instance.targetAppType == .toDesktop {
+                    Divider()
+
+                    Button {
+                        showMigrationSheet = true
+                    } label: {
+                        Label("Migrate Data from Primary…", systemImage: "square.and.arrow.down.on.square")
+                    }
+                    .disabled(isRunning)
+
+                    Button {
+                        backupPrimaryAppData()
+                    } label: {
+                        Label("Backup Primary App Data…", systemImage: "arrow.down.doc")
+                    }
+                    .disabled(isExportingData)
+                }
+
+                Button {
+                    exportInstanceData()
+                } label: {
+                    Label("Export Instance Data…", systemImage: "archivebox")
+                }
+                .disabled(isExportingData || !instance.dataDirectoryExists)
+
                 Divider()
-                
+
                 Button(role: .destructive) {
                     showDeleteConfirmation = true
                 } label: {
@@ -371,6 +410,75 @@ struct InstanceDetailView: View {
         }
     }
     
+    private func revealPrimaryDataInFinder() {
+        guard let app = try? Application(from: instance.targetAppPath),
+              let dirName = ElectronDataLocator.resolveApplicationSupportDirName(for: app) else { return }
+        let path = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support")
+            .appendingPathComponent(dirName)
+        if FileManager.default.fileExists(atPath: path.path) {
+            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path.path)
+        }
+    }
+
+    private func backupPrimaryAppData() {
+        guard let app = try? Application(from: instance.targetAppPath) else { return }
+        let sources = ElectronDataLocator.locateDataSources(for: app)
+        guard let mainSource = sources.first(where: { $0.category == .applicationSupport }) else { return }
+
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.zip]
+        panel.nameFieldStringValue = "\(app.name) - Primary Backup.zip"
+        panel.title = "Backup Primary App Data"
+        panel.message = "Choose a location to save the backup"
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        isExportingData = true
+        exportError = nil
+        Task {
+            defer { isExportingData = false }
+            do {
+                try await zipDirectory(mainSource.path, to: url)
+            } catch {
+                exportError = error.localizedDescription
+            }
+        }
+    }
+
+    private func exportInstanceData() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.zip]
+        panel.nameFieldStringValue = "\(instance.name) - Data.zip"
+        panel.title = "Export Instance Data"
+        panel.message = "Choose a location to save the instance data"
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        isExportingData = true
+        exportError = nil
+        Task {
+            defer { isExportingData = false }
+            do {
+                try await zipDirectory(instance.dataPath, to: url)
+            } catch {
+                exportError = error.localizedDescription
+            }
+        }
+    }
+
+    private func zipDirectory(_ source: URL, to destination: URL) async throws {
+        try await Task.detached {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+            process.arguments = ["-c", "-k", "--sequesterRsrc", "--keepParent", source.path, destination.path]
+            try process.run()
+            process.waitUntilExit()
+            if process.terminationStatus != 0 {
+                throw NSError(domain: "PluralMac", code: Int(process.terminationStatus),
+                              userInfo: [NSLocalizedDescriptionKey: "Failed to create zip archive"])
+            }
+        }.value
+    }
+
     // MARK: - Icon Loading
     
     @MainActor
@@ -422,6 +530,152 @@ struct DetailRow: View {
             Spacer()
         }
         .font(.body)
+    }
+}
+
+// MARK: - Migration Sheet
+
+struct MigrationSheetView: View {
+    let instance: AppInstance
+    @Bindable var viewModel: InstanceViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var sources: [DataSource] = []
+    @State private var isDiscovering = true
+    @State private var targetAppRunning = false
+    @State private var migrationError: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if isDiscovering {
+                    Section {
+                        ProgressView("Scanning for app data…")
+                            .padding(.vertical, 4)
+                    }
+                } else if sources.isEmpty {
+                    Section {
+                        Label("No existing data found for this app.", systemImage: "info.circle")
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Section("Data Sources") {
+                        ForEach(sources, id: \.path) { source in
+                            HStack {
+                                Image(systemName: iconForCategory(source.category))
+                                    .foregroundStyle(.secondary)
+                                Text(source.category.displayName)
+                                Spacer()
+                                Text(source.formattedSize)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        let totalSize = sources.reduce(Int64(0)) { $0 + $1.estimatedSize }
+                        HStack {
+                            Text("Total")
+                                .fontWeight(.medium)
+                            Spacer()
+                            Text(ByteCountFormatter.string(fromByteCount: totalSize, countStyle: .file))
+                                .fontWeight(.medium)
+                        }
+                    }
+
+                    if targetAppRunning {
+                        Section {
+                            Label("The app is running. Quit it before migrating.", systemImage: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.red)
+                            Button("Quit App") {
+                                for app in NSWorkspace.shared.runningApplications where app.bundleIdentifier == instance.targetBundleIdentifier {
+                                    app.terminate()
+                                }
+                                Task {
+                                    try? await Task.sleep(for: .seconds(1))
+                                    targetAppRunning = NSWorkspace.shared.runningApplications.contains {
+                                        $0.bundleIdentifier == instance.targetBundleIdentifier
+                                    }
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.red)
+                        }
+                    } else {
+                        Section {
+                            Label("Data will be copied, not moved. The original app will not be affected.", systemImage: "doc.on.doc")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if viewModel.isMigrating, let progress = viewModel.migrationProgress {
+                        Section("Progress") {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(progress.phase)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                ProgressView(value: Double(progress.bytesCompleted), total: max(Double(progress.bytesTotal), 1))
+                            }
+                        }
+                    }
+                }
+
+                if let error = migrationError {
+                    Section {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+            .formStyle(.grouped)
+            .frame(minWidth: 450, minHeight: 300)
+            .navigationTitle("Migrate Data")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                        .disabled(viewModel.isMigrating)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Migrate") {
+                        Task { await performMigration() }
+                    }
+                    .disabled(sources.isEmpty || targetAppRunning || viewModel.isMigrating)
+                }
+            }
+            .task { await discover() }
+        }
+    }
+
+    private func discover() async {
+        isDiscovering = true
+        targetAppRunning = NSWorkspace.shared.runningApplications.contains {
+            $0.bundleIdentifier == instance.targetBundleIdentifier
+        }
+        let app = try? Application(from: instance.targetAppPath)
+        if let app {
+            sources = await Task.detached {
+                ElectronDataLocator.locateDataSources(for: app)
+            }.value
+        }
+        isDiscovering = false
+    }
+
+    private func performMigration() async {
+        migrationError = nil
+        do {
+            try await viewModel.migrateInstance(instance, sources: sources)
+            dismiss()
+        } catch {
+            migrationError = error.localizedDescription
+        }
+    }
+
+    private func iconForCategory(_ category: DataCategory) -> String {
+        switch category {
+        case .applicationSupport: return "folder.fill"
+        case .caches: return "internaldrive"
+        case .preferences: return "gearshape"
+        case .savedApplicationState: return "clock.arrow.circlepath"
+        }
     }
 }
 

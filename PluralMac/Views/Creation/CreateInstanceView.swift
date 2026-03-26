@@ -31,6 +31,12 @@ struct CreateInstanceView: View {
     @State private var commandLineArguments: [String] = []
     @State private var customIconPath: URL?
     @State private var selectedIcon: NSImage?
+
+    // Migration
+    @State private var migrateFromPrimary = false
+    @State private var discoveredSources: [DataSource] = []
+    @State private var isDiscoveringSources = false
+    @State private var targetAppIsRunning = false
     
     // MARK: - Body
     
@@ -49,7 +55,12 @@ struct CreateInstanceView: View {
                 if let app = detectedApp {
                     appInfoSection(app: app)
                 }
-                
+
+                // Data Migration Section (Electron/toDesktop only)
+                if let app = detectedApp, app.appType == .electron || app.appType == .toDesktop {
+                    migrationSection(app: app)
+                }
+
                 // Advanced Options
                 if detectedApp != nil {
                     advancedOptionsSection
@@ -63,6 +74,7 @@ struct CreateInstanceView: View {
                     Button("Cancel") {
                         dismiss()
                     }
+                    .disabled(viewModel.isMigrating)
                 }
                 
                 ToolbarItem(placement: .confirmationAction) {
@@ -285,10 +297,124 @@ struct CreateInstanceView: View {
         }
     }
     
+    // MARK: - Data Migration Section
+
+    private func migrationSection(app: Application) -> some View {
+        Section {
+            Toggle("Migrate data from primary app", isOn: $migrateFromPrimary)
+                .onChange(of: migrateFromPrimary) { _, enabled in
+                    if enabled {
+                        discoverSources(for: app)
+                    } else {
+                        discoveredSources = []
+                    }
+                }
+
+            if migrateFromPrimary {
+                if isDiscoveringSources {
+                    ProgressView("Scanning for app data…")
+                        .padding(.vertical, 4)
+                } else if discoveredSources.isEmpty {
+                    Label("No existing data found for \(app.name).", systemImage: "info.circle")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(discoveredSources, id: \.path) { source in
+                        HStack {
+                            Image(systemName: iconForCategory(source.category))
+                                .foregroundStyle(.secondary)
+                            Text(source.category.displayName)
+                            Spacer()
+                            Text(source.formattedSize)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    let totalSize = discoveredSources.reduce(Int64(0)) { $0 + $1.estimatedSize }
+                    HStack {
+                        Text("Total")
+                            .fontWeight(.medium)
+                        Spacer()
+                        Text(ByteCountFormatter.string(fromByteCount: totalSize, countStyle: .file))
+                            .fontWeight(.medium)
+                    }
+                }
+
+                if targetAppIsRunning {
+                    Label("\(app.name) is running. Quit it before creating.", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                    Button("Quit \(app.name)") {
+                        quitTargetApp(bundleId: app.bundleIdentifier)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.red)
+                } else if !discoveredSources.isEmpty {
+                    Label("Data will be copied, not moved. The original app will not be affected.", systemImage: "doc.on.doc")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if viewModel.isMigrating, let progress = viewModel.migrationProgress {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(progress.phase)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        ProgressView(value: Double(progress.bytesCompleted), total: max(Double(progress.bytesTotal), 1))
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+        } header: {
+            Text("Data Migration")
+        } footer: {
+            if migrateFromPrimary && !discoveredSources.isEmpty {
+                Text("The new instance will start with a copy of \(app.name)'s existing data, including settings and logins.")
+            }
+        }
+    }
+
+    private func iconForCategory(_ category: DataCategory) -> String {
+        switch category {
+        case .applicationSupport: return "folder.fill"
+        case .caches: return "internaldrive"
+        case .preferences: return "gearshape"
+        case .savedApplicationState: return "clock.arrow.circlepath"
+        }
+    }
+
+    private func discoverSources(for app: Application) {
+        isDiscoveringSources = true
+        targetAppIsRunning = NSWorkspace.shared.runningApplications.contains {
+            $0.bundleIdentifier == app.bundleIdentifier
+        }
+        Task.detached {
+            let sources = ElectronDataLocator.locateDataSources(for: app)
+            await MainActor.run {
+                discoveredSources = sources
+                isDiscoveringSources = false
+            }
+        }
+    }
+
+    private func quitTargetApp(bundleId: String) {
+        for app in NSWorkspace.shared.runningApplications where app.bundleIdentifier == bundleId {
+            app.terminate()
+        }
+        // Re-check after a short delay
+        Task {
+            try? await Task.sleep(for: .seconds(1))
+            targetAppIsRunning = NSWorkspace.shared.runningApplications.contains {
+                $0.bundleIdentifier == bundleId
+            }
+        }
+    }
+
     // MARK: - Computed Properties
-    
+
     private var canCreate: Bool {
-        detectedApp != nil && !instanceName.trimmingCharacters(in: .whitespaces).isEmpty
+        guard detectedApp != nil, !instanceName.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        if viewModel.isMigrating { return false }
+        if migrateFromPrimary && targetAppIsRunning { return false }
+        return true
     }
     
     // MARK: - Actions
@@ -333,16 +459,18 @@ struct CreateInstanceView: View {
     
     private func createInstance() async {
         guard let app = detectedApp else { return }
-        
+
         let trimmedName = instanceName.trimmingCharacters(in: .whitespaces)
-        
+
         do {
             try await viewModel.createInstance(
                 name: trimmedName,
                 application: app,
                 environmentVariables: environmentVariables,
                 arguments: commandLineArguments,
-                customIconPath: customIconPath
+                customIconPath: customIconPath,
+                migrateFromPrimary: migrateFromPrimary,
+                migrationSources: discoveredSources
             )
             dismiss()
         } catch {
