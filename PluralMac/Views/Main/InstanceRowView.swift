@@ -150,11 +150,13 @@ struct InstanceRowView: View {
     
     @MainActor
     private func loadIcon() async {
-        // Try to load from shortcut bundle first
-        if instance.shortcutExists {
+        if let customPath = instance.customIconPath,
+           FileManager.default.fileExists(atPath: customPath.path),
+           let img = NSImage(contentsOf: customPath) {
+            appIcon = img
+        } else if instance.shortcutExists {
             appIcon = NSWorkspace.shared.icon(forFile: instance.shortcutPath.path)
         } else {
-            // Fall back to target app icon
             appIcon = NSWorkspace.shared.icon(forFile: instance.targetAppPath.path)
         }
     }

@@ -4,6 +4,7 @@
 //
 
 import Foundation
+import AppKit
 import OSLog
 
 /// Builds minimal .app trampoline bundles with unique CFBundleIdentifiers.
@@ -51,8 +52,13 @@ struct TrampolineBundleBuilder: Sendable {
         try script.write(to: scriptPath, atomically: true, encoding: .utf8)
         try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath.path)
 
-        // Copy icon from original app if available
-        copyIcon(from: application, to: resourcesPath)
+        // Use custom icon if set, otherwise copy from original app
+        if let customPath = instance.customIconPath,
+           fm.fileExists(atPath: customPath.path) {
+            copyCustomIcon(from: customPath, to: resourcesPath)
+        } else {
+            copyIcon(from: application, to: resourcesPath)
+        }
 
         // Ad-hoc code sign
         try codesign(bundlePath)
@@ -110,6 +116,49 @@ struct TrampolineBundleBuilder: Sendable {
         #!/bin/bash
         exec "\(executablePath.path)" "$@"
         """
+    }
+
+    private static func copyCustomIcon(from sourcePath: URL, to resourcesPath: URL) {
+        let destPath = resourcesPath.appendingPathComponent("AppIcon.icns")
+
+        // If the source is already .icns, copy directly
+        if sourcePath.pathExtension.lowercased() == "icns" {
+            try? fm.copyItem(at: sourcePath, to: destPath)
+            return
+        }
+
+        // Convert PNG/other image to ICNS via iconutil
+        guard let image = NSImage(contentsOf: sourcePath) else { return }
+        let tempIconset = fm.temporaryDirectory.appendingPathComponent("AppIcon.iconset")
+        try? fm.createDirectory(at: tempIconset, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempIconset) }
+
+        let sizes: [(String, Int)] = [
+            ("icon_16x16", 16), ("icon_16x16@2x", 32),
+            ("icon_32x32", 32), ("icon_32x32@2x", 64),
+            ("icon_128x128", 128), ("icon_128x128@2x", 256),
+            ("icon_256x256", 256), ("icon_256x256@2x", 512),
+            ("icon_512x512", 512), ("icon_512x512@2x", 1024),
+        ]
+
+        for (name, size) in sizes {
+            let resized = NSImage(size: NSSize(width: size, height: size))
+            resized.lockFocus()
+            image.draw(in: NSRect(x: 0, y: 0, width: size, height: size))
+            resized.unlockFocus()
+
+            if let tiff = resized.tiffRepresentation,
+               let rep = NSBitmapImageRep(data: tiff),
+               let png = rep.representation(using: .png, properties: [:]) {
+                try? png.write(to: tempIconset.appendingPathComponent("\(name).png"))
+            }
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/iconutil")
+        process.arguments = ["-c", "icns", "-o", destPath.path, tempIconset.path]
+        try? process.run()
+        process.waitUntilExit()
     }
 
     private static func copyIcon(from application: Application, to resourcesPath: URL) {
