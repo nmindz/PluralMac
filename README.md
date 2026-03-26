@@ -1,7 +1,7 @@
 # PluralMac
 
 <p align="center">
-  <img src="docs/images/icon.png" alt="PluralMac Icon" width="128" height="128">
+  <img src="docs/images/icon.png" alt="PluralMac Icon" width="256" height="256">
 </p>
 
 <p align="center">
