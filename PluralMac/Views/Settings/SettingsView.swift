@@ -166,29 +166,38 @@ struct AppearanceSettingsTab: View {
 // MARK: - About Settings
 
 struct AboutSettingsTab: View {
+    private var version: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "–"
+    }
+
+    private var buildNumber: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "–"
+    }
+
     var body: some View {
         VStack(spacing: 16) {
             Spacer()
-            
+
             Image(systemName: "square.stack.3d.up")
                 .font(.system(size: 48))
                 .foregroundStyle(.blue)
-            
+
             Text("PluralMac")
                 .font(.title)
                 .fontWeight(.bold)
-            
-            Text("Version 1.0")
+
+            Text("Version \(version) (\(buildNumber)) — \(BuildInfo.commitSHA)")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            
+                .textSelection(.enabled)
+
             Text("Run multiple instances of macOS apps\nwith isolated data storage.")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-            
+
             Spacer()
-            
+
             HStack {
                 Link("Website", destination: URL(string: "https://pluralmac.com")!)
                 Text("•")
@@ -196,11 +205,11 @@ struct AboutSettingsTab: View {
                 Link("GitHub", destination: URL(string: "https://github.com/mtech/PluralMac")!)
             }
             .font(.caption)
-            
+
             Text("© 2026 MTech. All rights reserved.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
-            
+
             Spacer()
         }
         .frame(maxWidth: .infinity)

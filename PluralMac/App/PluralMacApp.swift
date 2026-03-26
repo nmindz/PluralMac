@@ -34,6 +34,7 @@ struct PluralMacApp: App {
         #if os(macOS)
         Settings {
             SettingsView()
+                .environmentObject(MenuBarManager.shared)
         }
         #endif
     }

@@ -7,6 +7,9 @@ xcuserdata/
 *.xcscmblueprint
 *.xccheckout
 
+# Auto-generated at build time
+PluralMac/BuildInfo.swift
+
 # Xcode build artifacts
 build/
 DerivedData/

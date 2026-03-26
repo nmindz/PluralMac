@@ -68,58 +68,28 @@ actor DirectLauncher {
 
         let runningApp: NSRunningApplication
 
-        if instance.useTrampolineBundle && instance.shortcutExists {
-            // Trampoline launch: run the original binary directly via Process.
-            // This preserves the original binary's code signing identity (Keychain access)
-            // while the trampoline's unique CFBundleIdentifier prevents Electron
-            // singleton lock conflicts (Electron reads the binary's parent bundle plist).
-            let appName = instance.targetAppPath.deletingPathExtension().lastPathComponent
-            let process = Process()
-            process.executableURL = instance.targetAppPath
-                .appendingPathComponent("Contents/MacOS")
-                .appendingPathComponent(appName)
-            process.arguments = cmdArgs
-            process.environment = ProcessInfo.processInfo.environment.merging(envVars) { _, new in new }
+        runningApp = try await withCheckedThrowingContinuation { continuation in
+            Task { @MainActor in
+                let workspace = NSWorkspace.shared
+                let config = NSWorkspace.OpenConfiguration()
+                config.environment = envVars
+                config.arguments = cmdArgs
+                config.activates = true
+                // Trampoline bundles already have a unique CFBundleIdentifier,
+                // so macOS treats them as a separate app naturally.
+                // Direct launches need createsNewApplicationInstance to coexist.
+                config.createsNewApplicationInstance = !instance.useTrampolineBundle
 
-            try process.run()
-
-            // Wait for the process to register with the window server
-            try await Task.sleep(for: .milliseconds(500))
-
-            // Find the NSRunningApplication by PID
-            if let app = NSRunningApplication(processIdentifier: process.processIdentifier),
-               !app.isTerminated {
-                runningApp = app
-            } else {
-                // Electron may have forked — find the newest matching process
-                let matches = NSRunningApplication.runningApplications(withBundleIdentifier: instance.targetBundleIdentifier)
-                guard let match = matches.last else {
-                    throw DirectLaunchError.launchFailed("Process started but could not find running application")
-                }
-                runningApp = match
-            }
-        } else {
-            // Standard launch via NSWorkspace
-            runningApp = try await withCheckedThrowingContinuation { continuation in
-                Task { @MainActor in
-                    let workspace = NSWorkspace.shared
-                    let config = NSWorkspace.OpenConfiguration()
-                    config.environment = envVars
-                    config.arguments = cmdArgs
-                    config.activates = true
-                    config.createsNewApplicationInstance = true
-
-                    workspace.openApplication(
-                        at: launchPath,
-                        configuration: config
-                    ) { app, error in
-                        if let error = error {
-                            continuation.resume(throwing: DirectLaunchError.launchFailed(error.localizedDescription))
-                        } else if let app = app {
-                            continuation.resume(returning: app)
-                        } else {
-                            continuation.resume(throwing: DirectLaunchError.launchFailed("No application returned"))
-                        }
+                workspace.openApplication(
+                    at: launchPath,
+                    configuration: config
+                ) { app, error in
+                    if let error = error {
+                        continuation.resume(throwing: DirectLaunchError.launchFailed(error.localizedDescription))
+                    } else if let app = app {
+                        continuation.resume(returning: app)
+                    } else {
+                        continuation.resume(throwing: DirectLaunchError.launchFailed("No application returned"))
                     }
                 }
             }

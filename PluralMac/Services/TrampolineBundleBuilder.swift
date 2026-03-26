@@ -63,6 +63,10 @@ struct TrampolineBundleBuilder: Sendable {
         // Ad-hoc code sign
         try codesign(bundlePath)
 
+        // Register with Launch Services so macOS recognizes the trampoline
+        // as a distinct app (separate Dock icon, name, identity)
+        LaunchServicesHelper.register(bundlePath)
+
         logger.info("Trampoline built: \(bundlePath.path)")
     }
 
@@ -110,11 +114,13 @@ struct TrampolineBundleBuilder: Sendable {
     /// All arguments (including --user-data-dir) and environment variables are
     /// passed by NSWorkspace.OpenConfiguration and forwarded via exec + "$@".
     private static func buildLauncherScript(executablePath: URL) -> String {
-        // The executable path is a system path (/Applications/X.app/Contents/MacOS/X)
-        // and does not contain user input — safe to embed directly.
+        // Run as child process (not exec) so the trampoline remains the
+        // registered app with macOS. This keeps the Dock icon, name, and
+        // network identity associated with the trampoline bundle.
         """
         #!/bin/bash
-        exec "\(executablePath.path)" "$@"
+        "\(executablePath.path)" "$@" &
+        wait $!
         """
     }
 
