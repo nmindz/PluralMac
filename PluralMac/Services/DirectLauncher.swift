@@ -41,46 +41,85 @@ actor DirectLauncher {
         logger.info("Launching instance with NSWorkspace: \(instance.name)")
         
         // Capture values from instance
-        let targetAppPath = instance.targetAppPath
         let dataPath = instance.dataPath
         let instanceId = instance.id
         let instanceName = instance.name
         let envVars = instance.effectiveEnvironmentVariables
         let cmdArgs = instance.effectiveCommandLineArguments
-        
-        // Validate target app exists
-        guard fileManager.fileExists(atPath: targetAppPath.path) else {
-            throw DirectLaunchError.appNotFound(targetAppPath)
+
+        // When a trampoline bundle exists, launch it instead of the original.
+        // The trampoline has a unique CFBundleIdentifier, avoiding Electron
+        // single-instance lock conflicts. NSWorkspace passes env/args through.
+        let launchPath: URL
+        if instance.useTrampolineBundle && instance.shortcutExists {
+            launchPath = instance.shortcutPath
+        } else {
+            launchPath = instance.targetAppPath
+        }
+
+        // Validate launch target exists
+        guard fileManager.fileExists(atPath: launchPath.path) else {
+            throw DirectLaunchError.appNotFound(launchPath)
         }
         
         // Ensure data directory exists.
-        // Only build the full HOME container (symlinks, Library dirs) for HOME redirection.
-        // For --user-data-dir isolation the data path is used directly by the app.
         let isolationMethod = instance.effectiveIsolationMethod
         try await ensureDataDirectoryExists(dataPath: dataPath, homeRedirection: isolationMethod == .homeRedirection)
-        
-        // Launch using NSWorkspace - use continuation for callback-based API
-        let runningApp: NSRunningApplication = try await withCheckedThrowingContinuation { continuation in
-            Task { @MainActor in
-                let workspace = NSWorkspace.shared
-                
-                // Create configuration with environment variables
-                let config = NSWorkspace.OpenConfiguration()
-                config.environment = envVars
-                config.arguments = cmdArgs
-                config.activates = true
-                config.createsNewApplicationInstance = true  // Key! Creates new instance
-                
-                workspace.openApplication(
-                    at: targetAppPath,
-                    configuration: config
-                ) { app, error in
-                    if let error = error {
-                        continuation.resume(throwing: DirectLaunchError.launchFailed(error.localizedDescription))
-                    } else if let app = app {
-                        continuation.resume(returning: app)
-                    } else {
-                        continuation.resume(throwing: DirectLaunchError.launchFailed("No application returned"))
+
+        let runningApp: NSRunningApplication
+
+        if instance.useTrampolineBundle && instance.shortcutExists {
+            // Trampoline launch: run the original binary directly via Process.
+            // This preserves the original binary's code signing identity (Keychain access)
+            // while the trampoline's unique CFBundleIdentifier prevents Electron
+            // singleton lock conflicts (Electron reads the binary's parent bundle plist).
+            let appName = instance.targetAppPath.deletingPathExtension().lastPathComponent
+            let process = Process()
+            process.executableURL = instance.targetAppPath
+                .appendingPathComponent("Contents/MacOS")
+                .appendingPathComponent(appName)
+            process.arguments = cmdArgs
+            process.environment = ProcessInfo.processInfo.environment.merging(envVars) { _, new in new }
+
+            try process.run()
+
+            // Wait for the process to register with the window server
+            try await Task.sleep(for: .milliseconds(500))
+
+            // Find the NSRunningApplication by PID
+            if let app = NSRunningApplication(processIdentifier: process.processIdentifier),
+               !app.isTerminated {
+                runningApp = app
+            } else {
+                // Electron may have forked — find the newest matching process
+                let matches = NSRunningApplication.runningApplications(withBundleIdentifier: instance.targetBundleIdentifier)
+                guard let match = matches.last else {
+                    throw DirectLaunchError.launchFailed("Process started but could not find running application")
+                }
+                runningApp = match
+            }
+        } else {
+            // Standard launch via NSWorkspace
+            runningApp = try await withCheckedThrowingContinuation { continuation in
+                Task { @MainActor in
+                    let workspace = NSWorkspace.shared
+                    let config = NSWorkspace.OpenConfiguration()
+                    config.environment = envVars
+                    config.arguments = cmdArgs
+                    config.activates = true
+                    config.createsNewApplicationInstance = true
+
+                    workspace.openApplication(
+                        at: launchPath,
+                        configuration: config
+                    ) { app, error in
+                        if let error = error {
+                            continuation.resume(throwing: DirectLaunchError.launchFailed(error.localizedDescription))
+                        } else if let app = app {
+                            continuation.resume(returning: app)
+                        } else {
+                            continuation.resume(throwing: DirectLaunchError.launchFailed("No application returned"))
+                        }
                     }
                 }
             }

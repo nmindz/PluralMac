@@ -58,6 +58,11 @@ struct AppInstance: Identifiable, Codable, Hashable, Sendable {
     /// Optional notes/description for this instance
     var notes: String?
 
+    /// Whether this instance uses a trampoline .app bundle for launch isolation.
+    /// Gives the instance a unique CFBundleIdentifier so Electron's
+    /// single-instance lock doesn't conflict with the original app.
+    var useTrampolineBundle: Bool
+
     /// Whether this instance was created with data migrated from the primary app
     var migratedFromPrimary: Bool
     
@@ -106,6 +111,7 @@ struct AppInstance: Identifiable, Codable, Hashable, Sendable {
         self.eraseDataOnQuit = false
         self.showMenuBarIcon = false
         self.notes = nil
+        self.useTrampolineBundle = false
         self.migratedFromPrimary = false
 
         // Timestamps
@@ -288,6 +294,7 @@ extension AppInstance {
         case isolationMethodOverride
         case eraseDataOnQuit
         case showMenuBarIcon
+        case useTrampolineBundle
         case migratedFromPrimary
         case notes
         case createdAt
@@ -310,6 +317,7 @@ extension AppInstance {
         isolationMethodOverride = try container.decodeIfPresent(DataIsolationMethod.self, forKey: .isolationMethodOverride)
         eraseDataOnQuit = try container.decode(Bool.self, forKey: .eraseDataOnQuit)
         showMenuBarIcon = try container.decode(Bool.self, forKey: .showMenuBarIcon)
+        useTrampolineBundle = try container.decodeIfPresent(Bool.self, forKey: .useTrampolineBundle) ?? false
         migratedFromPrimary = try container.decodeIfPresent(Bool.self, forKey: .migratedFromPrimary) ?? false
         notes = try container.decodeIfPresent(String.self, forKey: .notes)
         createdAt = try container.decode(Date.self, forKey: .createdAt)

@@ -32,6 +32,10 @@ struct CreateInstanceView: View {
     @State private var customIconPath: URL?
     @State private var selectedIcon: NSImage?
 
+    // Advanced isolation
+    @State private var enableAdvancedIsolation = false
+    @State private var advancedIsolationMethod: AdvancedIsolationMethod = .noSingleton
+
     // Migration
     @State private var migrateFromPrimary = false
     @State private var discoveredSources: [DataSource] = []
@@ -56,8 +60,9 @@ struct CreateInstanceView: View {
                     appInfoSection(app: app)
                 }
 
-                // Data Migration Section (Electron/toDesktop only)
+                // Advanced Isolation + Migration (Electron/toDesktop only)
                 if let app = detectedApp, app.appType == .electron || app.appType == .toDesktop {
+                    advancedIsolationSection
                     migrationSection(app: app)
                 }
 
@@ -297,6 +302,33 @@ struct CreateInstanceView: View {
         }
     }
     
+    // MARK: - Advanced Isolation Section
+
+    private var advancedIsolationSection: some View {
+        Section {
+            Toggle("Enable Advanced Isolation", isOn: $enableAdvancedIsolation)
+
+            if enableAdvancedIsolation {
+                Picker("Method", selection: $advancedIsolationMethod) {
+                    ForEach(AdvancedIsolationMethod.allCases, id: \.self) { method in
+                        Text(method.label).tag(method)
+                    }
+                }
+                .pickerStyle(.radioGroup)
+
+                Text(advancedIsolationMethod.description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Advanced Isolation")
+        } footer: {
+            if !enableAdvancedIsolation {
+                Text("Extra methods to ensure that complex processes do not collide at runtime.")
+            }
+        }
+    }
+
     // MARK: - Data Migration Section
 
     private func migrationSection(app: Application) -> some View {
@@ -463,18 +495,49 @@ struct CreateInstanceView: View {
         let trimmedName = instanceName.trimmingCharacters(in: .whitespaces)
 
         do {
+            // Translate advanced isolation choice into the instance flags
+            let useTrampoline = enableAdvancedIsolation && advancedIsolationMethod == .trampolineBundle
+            var extraArgs = commandLineArguments
+            if enableAdvancedIsolation && advancedIsolationMethod == .noSingleton {
+                extraArgs.append("--no-singleton")
+            }
+
             try await viewModel.createInstance(
                 name: trimmedName,
                 application: app,
                 environmentVariables: environmentVariables,
-                arguments: commandLineArguments,
+                arguments: extraArgs,
                 customIconPath: customIconPath,
+                useTrampolineBundle: useTrampoline,
                 migrateFromPrimary: migrateFromPrimary,
                 migrationSources: discoveredSources
             )
             dismiss()
         } catch {
             validationError = error.localizedDescription
+        }
+    }
+}
+
+// MARK: - Advanced Isolation Method
+
+enum AdvancedIsolationMethod: String, CaseIterable {
+    case noSingleton
+    case trampolineBundle
+
+    var label: String {
+        switch self {
+        case .noSingleton: return "No-Singleton Flag"
+        case .trampolineBundle: return "Isolated Bundle"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .noSingleton:
+            return "Passes --no-singleton to bypass the app's single-instance lock. Simpler, but not all Electron apps support this flag."
+        case .trampolineBundle:
+            return "Creates a wrapper app with a unique identity. Fully isolates the process from the original. Works with all Electron apps."
         }
     }
 }

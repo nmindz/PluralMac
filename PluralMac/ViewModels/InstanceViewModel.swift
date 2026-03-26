@@ -111,6 +111,7 @@ final class InstanceViewModel {
         environmentVariables: [String: String] = [:],
         arguments: [String] = [],
         customIconPath: URL? = nil,
+        useTrampolineBundle: Bool = false,
         migrateFromPrimary: Bool = false,
         migrationSources: [DataSource] = []
     ) async throws -> AppInstance {
@@ -121,6 +122,12 @@ final class InstanceViewModel {
         instance.environmentVariables = environmentVariables
         instance.commandLineArguments = arguments
         instance.customIconPath = customIconPath
+        instance.useTrampolineBundle = useTrampolineBundle
+
+        // Build trampoline bundle if requested
+        if useTrampolineBundle {
+            try TrampolineBundleBuilder.build(for: instance, application: application)
+        }
 
         // Migrate data from primary app if requested
         if migrateFromPrimary, !migrationSources.isEmpty {
