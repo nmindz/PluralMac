@@ -28,6 +28,7 @@ struct InstanceDetailView: View {
     @State private var showMigrationSheet = false
     @State private var isExportingData = false
     @State private var exportError: String?
+    @State private var isSwitchingLaunchMethod = false
     
     @ObservedObject private var runningManager = RunningInstancesManager.shared
     
@@ -52,7 +53,12 @@ struct InstanceDetailView: View {
                 Divider()
                 
                 dataIsolationSection
-                
+
+                if instance.targetAppType == .electron || instance.targetAppType == .toDesktop {
+                    Divider()
+                    launchMethodSection
+                }
+
                 if !instance.environmentVariables.isEmpty {
                     Divider()
                     environmentSection
@@ -263,6 +269,107 @@ struct InstanceDetailView: View {
         }
     }
     
+    // MARK: - Launch Method Section
+
+    private var launchMethodSection: some View {
+        DetailSection(title: "Launch Method") {
+            let currentMethod = currentLaunchMethodLabel
+            DetailRow(label: "Current", value: currentMethod)
+
+            HStack(spacing: 12) {
+                if instance.useTrampolineBundle {
+                    Button("Switch to Direct Launch") {
+                        Task { await switchToDirectLaunch() }
+                    }
+                    .disabled(isRunning || isSwitchingLaunchMethod)
+
+                    Button("Switch to No-Singleton") {
+                        Task { await switchToNoSingleton() }
+                    }
+                    .disabled(isRunning || isSwitchingLaunchMethod)
+                } else if instance.commandLineArguments.contains("--no-singleton") {
+                    Button("Switch to Isolated Bundle") {
+                        Task { await switchToIsolatedBundle() }
+                    }
+                    .disabled(isRunning || isSwitchingLaunchMethod)
+
+                    Button("Switch to Direct Launch") {
+                        Task { await switchToDirectLaunch() }
+                    }
+                    .disabled(isRunning || isSwitchingLaunchMethod)
+                } else {
+                    Button("Enable Isolated Bundle") {
+                        Task { await switchToIsolatedBundle() }
+                    }
+                    .disabled(isRunning || isSwitchingLaunchMethod)
+
+                    Button("Enable No-Singleton") {
+                        Task { await switchToNoSingleton() }
+                    }
+                    .disabled(isRunning || isSwitchingLaunchMethod)
+                }
+            }
+            .buttonStyle(.bordered)
+
+            if isSwitchingLaunchMethod {
+                ProgressView()
+                    .controlSize(.small)
+            }
+
+            if isRunning {
+                Text("Stop the instance before changing launch method.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !instance.useTrampolineBundle && instance.commandLineArguments.contains("--no-singleton") {
+                Label("Custom Dock icon is not available with No-Singleton. The instance shares the original app's Dock icon.", systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        }
+    }
+
+    private var currentLaunchMethodLabel: String {
+        if instance.useTrampolineBundle {
+            return "Isolated Bundle"
+        } else if instance.commandLineArguments.contains("--no-singleton") {
+            return "No-Singleton Flag"
+        } else {
+            return "Direct Launch"
+        }
+    }
+
+    private func switchToIsolatedBundle() async {
+        isSwitchingLaunchMethod = true
+        defer { isSwitchingLaunchMethod = false }
+        do {
+            try await viewModel.switchLaunchMethod(instance, toTrampoline: true, noSingleton: false)
+        } catch {
+            exportError = error.localizedDescription
+        }
+    }
+
+    private func switchToNoSingleton() async {
+        isSwitchingLaunchMethod = true
+        defer { isSwitchingLaunchMethod = false }
+        do {
+            try await viewModel.switchLaunchMethod(instance, toTrampoline: false, noSingleton: true)
+        } catch {
+            exportError = error.localizedDescription
+        }
+    }
+
+    private func switchToDirectLaunch() async {
+        isSwitchingLaunchMethod = true
+        defer { isSwitchingLaunchMethod = false }
+        do {
+            try await viewModel.switchLaunchMethod(instance, toTrampoline: false, noSingleton: false)
+        } catch {
+            exportError = error.localizedDescription
+        }
+    }
+
     // MARK: - Environment Section
     
     private var environmentSection: some View {

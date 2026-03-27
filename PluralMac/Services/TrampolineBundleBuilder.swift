@@ -46,11 +46,13 @@ struct TrampolineBundleBuilder: Sendable {
         let plistPath = contentsPath.appendingPathComponent("Info.plist")
         try plist.write(to: plistPath, atomically: true, encoding: .utf8)
 
-        // Write launcher script
-        let script = buildLauncherScript(executablePath: application.executablePath)
-        let scriptPath = macOSPath.appendingPathComponent("launcher")
-        try script.write(to: scriptPath, atomically: true, encoding: .utf8)
-        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath.path)
+        // Compile a native launcher binary that exec's the original app.
+        // A real Mach-O binary gets proper foreground scheduling from macOS,
+        // unlike a shell script which gets classified as background.
+        try compileLauncher(
+            executablePath: application.executablePath,
+            outputPath: macOSPath.appendingPathComponent("launcher")
+        )
 
         // Use custom icon if set, otherwise copy from original app
         if let customPath = instance.customIconPath,
@@ -113,15 +115,38 @@ struct TrampolineBundleBuilder: Sendable {
     /// The launcher script only contains the path to the original executable.
     /// All arguments (including --user-data-dir) and environment variables are
     /// passed by NSWorkspace.OpenConfiguration and forwarded via exec + "$@".
-    private static func buildLauncherScript(executablePath: URL) -> String {
-        // Run as child process (not exec) so the trampoline remains the
-        // registered app with macOS. This keeps the Dock icon, name, and
-        // network identity associated with the trampoline bundle.
+    /// Compile a tiny native launcher that exec's the original binary.
+    /// A Mach-O binary gets foreground process scheduling from NSWorkspace,
+    /// unlike a shell script which macOS classifies as background.
+    private static func compileLauncher(executablePath: URL, outputPath: URL) throws {
+        let source = """
+        #include <unistd.h>
+        int main(int argc, char *argv[]) {
+            argv[0] = "\(executablePath.path)";
+            return execv("\(executablePath.path)", argv);
+        }
         """
-        #!/bin/bash
-        "\(executablePath.path)" "$@" &
-        wait $!
-        """
+
+        let tempSource = fm.temporaryDirectory.appendingPathComponent("launcher.c")
+        try source.write(to: tempSource, atomically: true, encoding: .utf8)
+        defer { try? fm.removeItem(at: tempSource) }
+
+        let clang = Process()
+        clang.executableURL = URL(fileURLWithPath: "/usr/bin/clang")
+        clang.arguments = [
+            "-arch", "x86_64", "-arch", "arm64",
+            "-O2", "-o", outputPath.path,
+            tempSource.path
+        ]
+        clang.standardOutput = nil
+        clang.standardError = nil
+        try clang.run()
+        clang.waitUntilExit()
+
+        guard clang.terminationStatus == 0 else {
+            throw NSError(domain: "TrampolineBundleBuilder", code: Int(clang.terminationStatus),
+                          userInfo: [NSLocalizedDescriptionKey: "Failed to compile launcher binary"])
+        }
     }
 
     private static func copyCustomIcon(from sourcePath: URL, to resourcesPath: URL) {

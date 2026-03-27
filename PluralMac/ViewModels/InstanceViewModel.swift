@@ -195,8 +195,35 @@ final class InstanceViewModel {
         try await updateInstance(updated)
     }
     
+    /// Switch an instance's launch method without touching its data.
+    func switchLaunchMethod(_ instance: AppInstance, toTrampoline: Bool, noSingleton: Bool) async throws {
+        var updated = instance
+
+        // Remove old trampoline if switching away
+        if instance.useTrampolineBundle && !toTrampoline {
+            try? TrampolineBundleBuilder.remove(at: instance.shortcutPath)
+        }
+
+        // Remove old --no-singleton if switching away
+        updated.commandLineArguments.removeAll { $0 == "--no-singleton" }
+
+        // Apply new method
+        updated.useTrampolineBundle = toTrampoline
+        if toTrampoline {
+            let app = try Application(from: instance.targetAppPath)
+            try TrampolineBundleBuilder.build(for: updated, application: app)
+        }
+        if noSingleton {
+            updated.commandLineArguments.append("--no-singleton")
+        }
+
+        updated.touch()
+        try await updateInstance(updated)
+        logger.info("Switched launch method for \(instance.name): trampoline=\(toTrampoline), noSingleton=\(noSingleton)")
+    }
+
     // MARK: - Instance Updates
-    
+
     /// Update an existing instance
     func updateInstance(_ instance: AppInstance) async throws {
         logger.info("Updating instance: \(instance.name)")

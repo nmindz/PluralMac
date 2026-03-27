@@ -29,6 +29,7 @@ build: buildinfo
 		PROVISIONING_PROFILE_SPECIFIER="" \
 		MARKETING_VERSION="$(VERSION)-$(COMMIT_SHA)" \
 		CURRENT_PROJECT_VERSION="$(BUILD_NUMBER)"
+	@open $(DERIVED_DATA)/Build/Products/$(CONFIGURATION)
 
 buildinfo:
 	@echo '// Auto-generated — do not edit' > PluralMac/BuildInfo.swift

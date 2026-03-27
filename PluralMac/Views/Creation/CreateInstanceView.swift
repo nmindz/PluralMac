@@ -201,17 +201,23 @@ struct CreateInstanceView: View {
                 argumentsEditor
             }
             
-            // Custom Icon
+            // Custom Icon (disabled for No-Singleton — Dock always shows original icon)
             VStack(alignment: .leading, spacing: 8) {
                 Text("Instance Icon")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                
-                IconPickerView(
-                    selectedIcon: $selectedIcon,
-                    customIconPath: $customIconPath,
-                    sourceAppURL: selectedAppURL
-                )
+
+                if enableAdvancedIsolation && advancedIsolationMethod == .noSingleton {
+                    Text("Custom Dock icon is only available with the Isolated Bundle method.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    IconPickerView(
+                        selectedIcon: $selectedIcon,
+                        customIconPath: $customIconPath,
+                        sourceAppURL: selectedAppURL
+                    )
+                }
             }
             .padding(.vertical, 4)
         } header: {
@@ -319,6 +325,12 @@ struct CreateInstanceView: View {
                 Text(advancedIsolationMethod.description)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                if advancedIsolationMethod == .noSingleton {
+                    Label("Custom Dock icon is not available with No-Singleton. The instance will share the original app's Dock icon.", systemImage: "info.circle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             }
         } header: {
             Text("Advanced Isolation")
