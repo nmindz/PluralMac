@@ -111,22 +111,31 @@ final class InstanceViewModel {
         environmentVariables: [String: String] = [:],
         arguments: [String] = [],
         customIconPath: URL? = nil,
-        useTrampolineBundle: Bool = false,
+        launchMethod: LaunchMethod = .direct,
+        useUserDataDir: Bool = false,
+        patchCloneBundle: Bool = false,
         migrateFromPrimary: Bool = false,
         migrationSources: [DataSource] = []
     ) async throws -> AppInstance {
         logger.info("Creating instance: \(name) for \(application.name)")
 
-        // Create the instance model
         var instance = AppInstance(name: name, application: application)
         instance.environmentVariables = environmentVariables
         instance.commandLineArguments = arguments
         instance.customIconPath = customIconPath
-        instance.useTrampolineBundle = useTrampolineBundle
+        instance.launchMethod = launchMethod
+        instance.useUserDataDir = useUserDataDir
+        instance.patchCloneBundle = patchCloneBundle
+        instance.originalAppVersion = application.version
 
-        // Build trampoline bundle if requested
-        if useTrampolineBundle {
+        // Build bundle if needed
+        switch launchMethod {
+        case .trampolineBundle:
             try TrampolineBundleBuilder.build(for: instance, application: application)
+        case .fullClone:
+            try AppCloneBuilder.build(for: instance, application: application, patchBundle: instance.patchCloneBundle)
+        case .direct, .noSingleton:
+            break
         }
 
         // Migrate data from primary app if requested
@@ -196,30 +205,49 @@ final class InstanceViewModel {
     }
     
     /// Switch an instance's launch method without touching its data.
-    func switchLaunchMethod(_ instance: AppInstance, toTrampoline: Bool, noSingleton: Bool) async throws {
+    func switchLaunchMethod(_ instance: AppInstance, to method: LaunchMethod) async throws {
         var updated = instance
 
-        // Remove old trampoline if switching away
-        if instance.useTrampolineBundle && !toTrampoline {
-            try? TrampolineBundleBuilder.remove(at: instance.shortcutPath)
+        // Clean up old bundle if switching away from a bundle-based method
+        if instance.launchMethod.requiresBundle && !method.requiresBundle {
+            if instance.launchMethod == .fullClone {
+                try? AppCloneBuilder.remove(for: instance)
+            } else {
+                try? TrampolineBundleBuilder.remove(at: instance.shortcutPath)
+            }
         }
 
-        // Remove old --no-singleton if switching away
+        // Remove stale --no-singleton from stored args (now handled by LaunchMethod)
         updated.commandLineArguments.removeAll { $0 == "--no-singleton" }
 
-        // Apply new method
-        updated.useTrampolineBundle = toTrampoline
-        if toTrampoline {
-            let app = try Application(from: instance.targetAppPath)
+        updated.launchMethod = method
+
+        // Build new bundle if needed
+        let app = try Application(from: instance.targetAppPath)
+        switch method {
+        case .trampolineBundle:
             try TrampolineBundleBuilder.build(for: updated, application: app)
-        }
-        if noSingleton {
-            updated.commandLineArguments.append("--no-singleton")
+        case .fullClone:
+            try AppCloneBuilder.build(for: updated, application: app, patchBundle: updated.patchCloneBundle)
+            updated.originalAppVersion = app.version
+        case .direct, .noSingleton:
+            break
         }
 
         updated.touch()
         try await updateInstance(updated)
-        logger.info("Switched launch method for \(instance.name): trampoline=\(toTrampoline), noSingleton=\(noSingleton)")
+        logger.info("Switched launch method for \(instance.name) to \(method.rawValue)")
+    }
+
+    /// Rebuild the clone bundle (e.g. after original app update).
+    func rebuildClone(_ instance: AppInstance) async throws {
+        guard instance.launchMethod == .fullClone else { return }
+        let app = try Application(from: instance.targetAppPath)
+        try AppCloneBuilder.build(for: instance, application: app, patchBundle: instance.patchCloneBundle)
+        var updated = instance
+        updated.originalAppVersion = app.version
+        updated.touch()
+        try await updateInstance(updated)
     }
 
     // MARK: - Instance Updates
@@ -274,6 +302,12 @@ final class InstanceViewModel {
             _ = await directLauncher.terminate(instance.id)
         }
         
+        // Clean up bundle (trampoline or clone)
+        if instance.launchMethod.requiresBundle && instance.shortcutExists {
+            try? FileManager.default.removeItem(at: instance.shortcutPath)
+            logger.debug("Deleted bundle at: \(instance.shortcutPath.path)")
+        }
+
         // Delete data directory if requested
         if deleteData {
             let fileManager = FileManager.default
@@ -282,7 +316,7 @@ final class InstanceViewModel {
                 logger.debug("Deleted data at: \(instance.dataPath.path)")
             }
         }
-        
+
         // Remove from storage
         try await store.deleteInstance(id: instance.id)
         
@@ -370,7 +404,6 @@ final class InstanceViewModel {
         // Load the original application
         let application = try Application(from: instance.targetAppPath)
         
-        // Create new instance with same settings
         var newInstance = AppInstance(name: newName, application: application)
         newInstance.environmentVariables = instance.environmentVariables
         newInstance.commandLineArguments = instance.commandLineArguments
@@ -378,8 +411,20 @@ final class InstanceViewModel {
         newInstance.isolationMethodOverride = instance.isolationMethodOverride
         newInstance.eraseDataOnQuit = instance.eraseDataOnQuit
         newInstance.showMenuBarIcon = instance.showMenuBarIcon
-        
-        // No bundle needed - just save to storage
+        newInstance.launchMethod = instance.launchMethod
+        newInstance.useUserDataDir = instance.useUserDataDir
+
+        // Build bundle for the duplicate if needed
+        switch newInstance.launchMethod {
+        case .trampolineBundle:
+            try TrampolineBundleBuilder.build(for: newInstance, application: application)
+        case .fullClone:
+            try AppCloneBuilder.build(for: newInstance, application: application, patchBundle: newInstance.patchCloneBundle)
+            newInstance.originalAppVersion = application.version
+        case .direct, .noSingleton:
+            break
+        }
+
         try await store.addInstance(newInstance)
         
         // Update local list

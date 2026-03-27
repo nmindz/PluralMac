@@ -47,11 +47,10 @@ actor DirectLauncher {
         let envVars = instance.effectiveEnvironmentVariables
         let cmdArgs = instance.effectiveCommandLineArguments
 
-        // When a trampoline bundle exists, launch it instead of the original.
-        // The trampoline has a unique CFBundleIdentifier, avoiding Electron
-        // single-instance lock conflicts. NSWorkspace passes env/args through.
+        // For methods with a bundle (trampoline, full clone, or clone+wrapper),
+        // launch from shortcutPath. Otherwise launch the original app.
         let launchPath: URL
-        if instance.useTrampolineBundle && instance.shortcutExists {
+        if instance.launchMethod.requiresBundle && instance.shortcutExists {
             launchPath = instance.shortcutPath
         } else {
             launchPath = instance.targetAppPath
@@ -62,9 +61,13 @@ actor DirectLauncher {
             throw DirectLaunchError.appNotFound(launchPath)
         }
         
-        // Ensure data directory exists.
-        let isolationMethod = instance.effectiveIsolationMethod
-        try await ensureDataDirectoryExists(dataPath: dataPath, homeRedirection: isolationMethod == .homeRedirection)
+        // Ensure data directory exists when we're managing the data path.
+        // Full clone without useUserDataDir manages its own default data path.
+        let managesDataDir = instance.launchMethod != .fullClone || instance.useUserDataDir
+        if managesDataDir {
+            let isolationMethod = instance.effectiveIsolationMethod
+            try await ensureDataDirectoryExists(dataPath: dataPath, homeRedirection: isolationMethod == .homeRedirection)
+        }
 
         let runningApp: NSRunningApplication
 
@@ -75,10 +78,9 @@ actor DirectLauncher {
                 config.environment = envVars
                 config.arguments = cmdArgs
                 config.activates = true
-                // Trampoline bundles already have a unique CFBundleIdentifier,
-                // so macOS treats them as a separate app naturally.
-                // Direct launches need createsNewApplicationInstance to coexist.
-                config.createsNewApplicationInstance = !instance.useTrampolineBundle
+                // Bundles (trampoline/clone) already have unique identities.
+                // Direct/no-singleton launches need createsNewApplicationInstance.
+                config.createsNewApplicationInstance = !instance.launchMethod.requiresBundle
 
                 workspace.openApplication(
                     at: launchPath,

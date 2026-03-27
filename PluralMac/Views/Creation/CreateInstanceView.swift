@@ -32,9 +32,11 @@ struct CreateInstanceView: View {
     @State private var customIconPath: URL?
     @State private var selectedIcon: NSImage?
 
-    // Advanced isolation
-    @State private var enableAdvancedIsolation = false
-    @State private var advancedIsolationMethod: AdvancedIsolationMethod = .noSingleton
+    // Launch method
+    @State private var selectedLaunchMethod: LaunchMethod = .direct
+    @State private var useUserDataDir = false
+    @State private var patchCloneBundle = false
+    @State private var hasAppliedPreset = false
 
     // Migration
     @State private var migrateFromPrimary = false
@@ -60,9 +62,9 @@ struct CreateInstanceView: View {
                     appInfoSection(app: app)
                 }
 
-                // Advanced Isolation + Migration (Electron/toDesktop only)
+                // Launch Method + Migration (Electron/toDesktop only)
                 if let app = detectedApp, app.appType == .electron || app.appType == .toDesktop {
-                    advancedIsolationSection
+                    launchMethodSection(app: app)
                     migrationSection(app: app)
                 }
 
@@ -201,14 +203,14 @@ struct CreateInstanceView: View {
                 argumentsEditor
             }
             
-            // Custom Icon (disabled for No-Singleton — Dock always shows original icon)
+            // Custom Icon
             VStack(alignment: .leading, spacing: 8) {
                 Text("Instance Icon")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
-                if enableAdvancedIsolation && advancedIsolationMethod == .noSingleton {
-                    Text("Custom Dock icon is only available with the Isolated Bundle method.")
+                if selectedLaunchMethod == .noSingleton || selectedLaunchMethod == .direct {
+                    Text("Custom Dock icon requires Isolated Bundle or Full App Clone method.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
@@ -308,35 +310,73 @@ struct CreateInstanceView: View {
         }
     }
     
-    // MARK: - Advanced Isolation Section
+    // MARK: - Launch Method Section
 
-    private var advancedIsolationSection: some View {
+    private func launchMethodSection(app: Application) -> some View {
         Section {
-            Toggle("Enable Advanced Isolation", isOn: $enableAdvancedIsolation)
-
-            if enableAdvancedIsolation {
-                Picker("Method", selection: $advancedIsolationMethod) {
-                    ForEach(AdvancedIsolationMethod.allCases, id: \.self) { method in
-                        Text(method.label).tag(method)
-                    }
+            Picker("Launch Method", selection: $selectedLaunchMethod) {
+                ForEach(LaunchMethod.allCases, id: \.self) { method in
+                    Text(method.label).tag(method)
                 }
-                .pickerStyle(.radioGroup)
+            }
+            .pickerStyle(.radioGroup)
 
-                Text(advancedIsolationMethod.description)
+            Text(selectedLaunchMethod.description)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if selectedLaunchMethod == .fullClone {
+                Label("Recommended for Electron apps", systemImage: "star.fill")
+                    .font(.caption)
+                    .foregroundStyle(.blue)
+
+                if let size = try? FileManager.default.attributesOfItem(atPath: app.path.path)[.size] as? Int64 {
+                    let formatted = ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+                    Text("Clone size: ~\(formatted)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if selectedLaunchMethod == .noSingleton {
+                Label("Custom Dock icon is not available with No-Singleton.", systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
+            Toggle("Redirect data directory (--user-data-dir)", isOn: $useUserDataDir)
+
+            if useUserDataDir {
+                Text("App data is stored in PluralMac's data directory for full isolation.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            } else if selectedLaunchMethod == .fullClone {
+                Text("App uses its default data path. May share data with the original app.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
 
-                if advancedIsolationMethod == .noSingleton {
-                    Label("Custom Dock icon is not available with No-Singleton. The instance will share the original app's Dock icon.", systemImage: "info.circle")
+            if selectedLaunchMethod == .fullClone {
+                Toggle("Customize clone bundle (name, icon, bundle ID)", isOn: $patchCloneBundle)
+
+                if patchCloneBundle {
+                    Text("Modifies the clone's identity and re-signs it. Enables custom Dock icon but may break apps that validate their own signature (e.g. Claude Desktop).")
                         .font(.caption)
                         .foregroundStyle(.orange)
+                } else {
+                    Text("Preserves the original signature. Most compatible, but Dock icon matches the original app.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         } header: {
-            Text("Advanced Isolation")
-        } footer: {
-            if !enableAdvancedIsolation {
-                Text("Extra methods to ensure that complex processes do not collide at runtime.")
+            Text("Launch Method")
+        }
+        .onAppear {
+            if !hasAppliedPreset && (app.appType == .electron || app.appType == .toDesktop) {
+                selectedLaunchMethod = .fullClone
+                useUserDataDir = true
+                hasAppliedPreset = true
             }
         }
     }
@@ -507,20 +547,15 @@ struct CreateInstanceView: View {
         let trimmedName = instanceName.trimmingCharacters(in: .whitespaces)
 
         do {
-            // Translate advanced isolation choice into the instance flags
-            let useTrampoline = enableAdvancedIsolation && advancedIsolationMethod == .trampolineBundle
-            var extraArgs = commandLineArguments
-            if enableAdvancedIsolation && advancedIsolationMethod == .noSingleton {
-                extraArgs.append("--no-singleton")
-            }
-
             try await viewModel.createInstance(
                 name: trimmedName,
                 application: app,
                 environmentVariables: environmentVariables,
-                arguments: extraArgs,
+                arguments: commandLineArguments,
                 customIconPath: customIconPath,
-                useTrampolineBundle: useTrampoline,
+                launchMethod: selectedLaunchMethod,
+                useUserDataDir: useUserDataDir,
+                patchCloneBundle: patchCloneBundle,
                 migrateFromPrimary: migrateFromPrimary,
                 migrationSources: discoveredSources
             )
@@ -532,27 +567,6 @@ struct CreateInstanceView: View {
 }
 
 // MARK: - Advanced Isolation Method
-
-enum AdvancedIsolationMethod: String, CaseIterable {
-    case noSingleton
-    case trampolineBundle
-
-    var label: String {
-        switch self {
-        case .noSingleton: return "No-Singleton Flag"
-        case .trampolineBundle: return "Isolated Bundle"
-        }
-    }
-
-    var description: String {
-        switch self {
-        case .noSingleton:
-            return "Passes --no-singleton to bypass the app's single-instance lock. Simpler, but not all Electron apps support this flag."
-        case .trampolineBundle:
-            return "Creates a wrapper app with a unique identity. Fully isolates the process from the original. Works with all Electron apps."
-        }
-    }
-}
 
 // MARK: - Preview
 

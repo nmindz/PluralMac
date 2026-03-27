@@ -7,6 +7,45 @@
 
 import Foundation
 
+/// How the instance is launched relative to the original app.
+enum LaunchMethod: String, Codable, Sendable, CaseIterable {
+    /// Launch the original app directly (with createsNewApplicationInstance)
+    case direct
+    /// Pass --no-singleton to bypass Electron's single-instance lock
+    case noSingleton
+    /// Create a minimal wrapper .app that exec's the original binary
+    case trampolineBundle
+    /// Copy the entire .app bundle with a unique CFBundleIdentifier
+    case fullClone
+
+    var label: String {
+        switch self {
+        case .direct: return "Direct Launch"
+        case .noSingleton: return "No-Singleton Flag"
+        case .trampolineBundle: return "Isolated Bundle"
+        case .fullClone: return "Full App Clone"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .direct:
+            return "Launches the original app directly. Simplest, but may conflict with the original when both run."
+        case .noSingleton:
+            return "Passes --no-singleton to bypass the app's single-instance lock. Custom Dock icon not available."
+        case .trampolineBundle:
+            return "Creates a lightweight wrapper app. May have issues with some Electron apps under Rosetta."
+        case .fullClone:
+            return "Copies the entire app with a unique identity. Best isolation for Electron apps like Claude Desktop."
+        }
+    }
+
+    /// Whether this method requires a bundle at shortcutPath
+    var requiresBundle: Bool {
+        self == .trampolineBundle || self == .fullClone
+    }
+}
+
 /// Represents a configured instance of an application with isolated data storage.
 /// Each instance can have its own environment variables, command-line arguments,
 /// custom icon, and data directory.
@@ -58,10 +97,20 @@ struct AppInstance: Identifiable, Codable, Hashable, Sendable {
     /// Optional notes/description for this instance
     var notes: String?
 
-    /// Whether this instance uses a trampoline .app bundle for launch isolation.
-    /// Gives the instance a unique CFBundleIdentifier so Electron's
-    /// single-instance lock doesn't conflict with the original app.
-    var useTrampolineBundle: Bool
+    /// How this instance is launched relative to the original app.
+    var launchMethod: LaunchMethod
+
+    /// Whether to pass --user-data-dir to redirect app data to PluralMac's data directory.
+    /// Independent of launch method — can be combined with any method.
+    var useUserDataDir: Bool
+
+    /// Whether the clone bundle should be patched (bundle ID, name, icon, re-signed).
+    /// Default false — preserves original signature for apps that validate it.
+    /// When true, enables custom Dock icon and unique bundle identity.
+    var patchCloneBundle: Bool
+
+    /// Version of the original app at clone time (for detecting updates).
+    var originalAppVersion: String?
 
     /// Whether this instance was created with data migrated from the primary app
     var migratedFromPrimary: Bool
@@ -111,7 +160,10 @@ struct AppInstance: Identifiable, Codable, Hashable, Sendable {
         self.eraseDataOnQuit = false
         self.showMenuBarIcon = false
         self.notes = nil
-        self.useTrampolineBundle = false
+        self.launchMethod = .direct
+        self.useUserDataDir = false
+        self.patchCloneBundle = false
+        self.originalAppVersion = nil
         self.migratedFromPrimary = false
 
         // Timestamps
@@ -153,14 +205,16 @@ struct AppInstance: Identifiable, Codable, Hashable, Sendable {
             return !isDeniedPrefix && !isDeniedName
         }
 
-        // Always redirect HOME for complete isolation
-        // This ensures apps that hardcode paths still work
-        env["HOME"] = dataPath.path
-
-        // Also set XDG directories for apps that use them
-        env["XDG_CONFIG_HOME"] = dataPath.appendingPathComponent(".config").path
-        env["XDG_DATA_HOME"] = dataPath.appendingPathComponent(".local/share").path
-        env["XDG_CACHE_HOME"] = dataPath.appendingPathComponent(".cache").path
+        // Full clones should NEVER redirect HOME — they need access to
+        // the real ~/Library/Keychains for safeStorage/Keychain access.
+        // --user-data-dir handles data isolation without HOME redirection.
+        let needsHomeRedirection = launchMethod != .fullClone
+        if needsHomeRedirection {
+            env["HOME"] = dataPath.path
+            env["XDG_CONFIG_HOME"] = dataPath.appendingPathComponent(".config").path
+            env["XDG_DATA_HOME"] = dataPath.appendingPathComponent(".local/share").path
+            env["XDG_CACHE_HOME"] = dataPath.appendingPathComponent(".cache").path
+        }
 
         return env
     }
@@ -168,40 +222,57 @@ struct AppInstance: Identifiable, Codable, Hashable, Sendable {
     /// Get the complete command-line arguments including data isolation args
     var effectiveCommandLineArguments: [String] {
         var args = commandLineArguments
-        
+
+        // Inject --no-singleton when that launch method is selected
+        if launchMethod == .noSingleton && !args.contains("--no-singleton") {
+            args.append("--no-singleton")
+        }
+
         // Check for app-specific arguments first
         let bundleId = targetBundleIdentifier.lowercased()
-        
-        // Spotify uses --mu for multiple instances
+
         if bundleId.contains("spotify") {
             args.append("--mu=\(id.uuidString)")
             return args
         }
-        
-        // Discord uses --multi-instance to allow multiple windows
-        // NOTE: Discord does NOT support data isolation - it ignores --user-data-dir and HOME
-        // All instances share the same account/data. This only allows multiple windows.
+
         if bundleId.contains("discord") {
             args.append("--multi-instance")
             return args
         }
-        
-        // Slack uses --user-data-dir
+
         if bundleId.contains("slack") {
-            args.append("--user-data-dir=\(dataPath.path)")
+            if useUserDataDir {
+                args.append("--user-data-dir=\(dataPath.path)")
+            }
             return args
         }
-        
-        // Default behavior based on isolation method
-        switch effectiveIsolationMethod {
-        case .userDataDir:
+
+        // Explicit --user-data-dir toggle (independent of launch method)
+        if useUserDataDir {
             args.append("--user-data-dir=\(dataPath.path)")
-        case .profileArgument:
-            args.append(contentsOf: ["-profile", dataPath.path])
-        case .homeRedirection, .none:
-            break
+            // Use file-based password store so each instance has independent
+            // Chromium credential storage (not shared via macOS Keychain).
+            if targetAppType == .electron || targetAppType == .toDesktop {
+                if !args.contains("--password-store=basic") {
+                    args.append("--password-store=basic")
+                }
+            }
+            return args
         }
-        
+
+        // Default behavior based on isolation method (for non-clone, non-explicit methods)
+        if launchMethod == .direct {
+            switch effectiveIsolationMethod {
+            case .userDataDir:
+                args.append("--user-data-dir=\(dataPath.path)")
+            case .profileArgument:
+                args.append(contentsOf: ["-profile", dataPath.path])
+            case .homeRedirection, .none:
+                break
+            }
+        }
+
         return args
     }
     
@@ -281,25 +352,12 @@ struct AppInstance: Identifiable, Codable, Hashable, Sendable {
 
 extension AppInstance {
     enum CodingKeys: String, CodingKey {
-        case id
-        case name
-        case targetBundleIdentifier
-        case targetAppPath
-        case targetAppType
-        case shortcutPath
-        case dataPath
-        case environmentVariables
-        case commandLineArguments
-        case customIconPath
-        case isolationMethodOverride
-        case eraseDataOnQuit
-        case showMenuBarIcon
-        case useTrampolineBundle
-        case migratedFromPrimary
-        case notes
-        case createdAt
-        case modifiedAt
-        case lastLaunchedAt
+        case id, name, targetBundleIdentifier, targetAppPath, targetAppType
+        case shortcutPath, dataPath, environmentVariables, commandLineArguments
+        case customIconPath, isolationMethodOverride, eraseDataOnQuit, showMenuBarIcon
+        case launchMethod, useUserDataDir, patchCloneBundle, originalAppVersion
+        case useTrampolineBundle // legacy, read-only for migration
+        case migratedFromPrimary, notes, createdAt, modifiedAt, lastLaunchedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -317,12 +375,57 @@ extension AppInstance {
         isolationMethodOverride = try container.decodeIfPresent(DataIsolationMethod.self, forKey: .isolationMethodOverride)
         eraseDataOnQuit = try container.decode(Bool.self, forKey: .eraseDataOnQuit)
         showMenuBarIcon = try container.decode(Bool.self, forKey: .showMenuBarIcon)
-        useTrampolineBundle = try container.decodeIfPresent(Bool.self, forKey: .useTrampolineBundle) ?? false
+
+        // Backward compat: migrate old useTrampolineBundle -> launchMethod
+        if let method = try container.decodeIfPresent(LaunchMethod.self, forKey: .launchMethod) {
+            launchMethod = method
+        } else if let oldTrampoline = try container.decodeIfPresent(Bool.self, forKey: .useTrampolineBundle), oldTrampoline {
+            launchMethod = .trampolineBundle
+        } else {
+            launchMethod = .direct
+        }
+
+        useUserDataDir = try container.decodeIfPresent(Bool.self, forKey: .useUserDataDir) ?? false
+        patchCloneBundle = try container.decodeIfPresent(Bool.self, forKey: .patchCloneBundle) ?? false
+        originalAppVersion = try container.decodeIfPresent(String.self, forKey: .originalAppVersion)
         migratedFromPrimary = try container.decodeIfPresent(Bool.self, forKey: .migratedFromPrimary) ?? false
         notes = try container.decodeIfPresent(String.self, forKey: .notes)
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         modifiedAt = try container.decode(Date.self, forKey: .modifiedAt)
         lastLaunchedAt = try container.decodeIfPresent(Date.self, forKey: .lastLaunchedAt)
+
+        // Migrate --no-singleton from args to launch method
+        if launchMethod == .direct && commandLineArguments.contains("--no-singleton") {
+            launchMethod = .noSingleton
+            commandLineArguments.removeAll { $0 == "--no-singleton" }
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(targetBundleIdentifier, forKey: .targetBundleIdentifier)
+        try container.encode(targetAppPath, forKey: .targetAppPath)
+        try container.encode(targetAppType, forKey: .targetAppType)
+        try container.encode(shortcutPath, forKey: .shortcutPath)
+        try container.encode(dataPath, forKey: .dataPath)
+        try container.encode(environmentVariables, forKey: .environmentVariables)
+        try container.encode(commandLineArguments, forKey: .commandLineArguments)
+        try container.encodeIfPresent(customIconPath, forKey: .customIconPath)
+        try container.encodeIfPresent(isolationMethodOverride, forKey: .isolationMethodOverride)
+        try container.encode(eraseDataOnQuit, forKey: .eraseDataOnQuit)
+        try container.encode(showMenuBarIcon, forKey: .showMenuBarIcon)
+        try container.encode(launchMethod, forKey: .launchMethod)
+        try container.encode(useUserDataDir, forKey: .useUserDataDir)
+        try container.encode(patchCloneBundle, forKey: .patchCloneBundle)
+        try container.encodeIfPresent(originalAppVersion, forKey: .originalAppVersion)
+        try container.encode(migratedFromPrimary, forKey: .migratedFromPrimary)
+        try container.encodeIfPresent(notes, forKey: .notes)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(modifiedAt, forKey: .modifiedAt)
+        try container.encodeIfPresent(lastLaunchedAt, forKey: .lastLaunchedAt)
+        // Note: useTrampolineBundle is NOT encoded — it's legacy read-only
     }
 }
 

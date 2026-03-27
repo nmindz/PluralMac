@@ -273,43 +273,36 @@ struct InstanceDetailView: View {
 
     private var launchMethodSection: some View {
         DetailSection(title: "Launch Method") {
-            let currentMethod = currentLaunchMethodLabel
-            DetailRow(label: "Current", value: currentMethod)
+            DetailRow(label: "Current", value: instance.launchMethod.label)
 
-            HStack(spacing: 12) {
-                if instance.useTrampolineBundle {
-                    Button("Switch to Direct Launch") {
-                        Task { await switchToDirectLaunch() }
-                    }
-                    .disabled(isRunning || isSwitchingLaunchMethod)
-
-                    Button("Switch to No-Singleton") {
-                        Task { await switchToNoSingleton() }
-                    }
-                    .disabled(isRunning || isSwitchingLaunchMethod)
-                } else if instance.commandLineArguments.contains("--no-singleton") {
-                    Button("Switch to Isolated Bundle") {
-                        Task { await switchToIsolatedBundle() }
-                    }
-                    .disabled(isRunning || isSwitchingLaunchMethod)
-
-                    Button("Switch to Direct Launch") {
-                        Task { await switchToDirectLaunch() }
-                    }
-                    .disabled(isRunning || isSwitchingLaunchMethod)
-                } else {
-                    Button("Enable Isolated Bundle") {
-                        Task { await switchToIsolatedBundle() }
-                    }
-                    .disabled(isRunning || isSwitchingLaunchMethod)
-
-                    Button("Enable No-Singleton") {
-                        Task { await switchToNoSingleton() }
+            // Switch buttons — show all methods except current
+            let otherMethods = LaunchMethod.allCases.filter { $0 != instance.launchMethod }
+            HStack(spacing: 8) {
+                ForEach(otherMethods, id: \.self) { method in
+                    Button("Switch to \(method.label)") {
+                        Task { await switchMethod(to: method) }
                     }
                     .disabled(isRunning || isSwitchingLaunchMethod)
                 }
             }
             .buttonStyle(.bordered)
+
+            // Rebuild button for full clone
+            if instance.launchMethod == .fullClone && AppCloneBuilder.needsRebuild(instance: instance) {
+                Label("The original app has been updated. Rebuild the clone to pick up changes.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                Button("Rebuild Clone") {
+                    Task { await rebuildClone() }
+                }
+                .buttonStyle(.bordered)
+                .disabled(isRunning || isSwitchingLaunchMethod)
+            }
+
+            // Version info for clone
+            if instance.launchMethod == .fullClone, let ver = instance.originalAppVersion {
+                DetailRow(label: "Cloned from", value: "v\(ver)")
+            }
 
             if isSwitchingLaunchMethod {
                 ProgressView()
@@ -322,49 +315,29 @@ struct InstanceDetailView: View {
                     .foregroundStyle(.secondary)
             }
 
-            if !instance.useTrampolineBundle && instance.commandLineArguments.contains("--no-singleton") {
-                Label("Custom Dock icon is not available with No-Singleton. The instance shares the original app's Dock icon.", systemImage: "info.circle")
+            if instance.launchMethod == .noSingleton || instance.launchMethod == .direct {
+                Label("Custom Dock icon not available with this method.", systemImage: "info.circle")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
         }
     }
 
-    private var currentLaunchMethodLabel: String {
-        if instance.useTrampolineBundle {
-            return "Isolated Bundle"
-        } else if instance.commandLineArguments.contains("--no-singleton") {
-            return "No-Singleton Flag"
-        } else {
-            return "Direct Launch"
-        }
-    }
-
-    private func switchToIsolatedBundle() async {
+    private func switchMethod(to method: LaunchMethod) async {
         isSwitchingLaunchMethod = true
         defer { isSwitchingLaunchMethod = false }
         do {
-            try await viewModel.switchLaunchMethod(instance, toTrampoline: true, noSingleton: false)
+            try await viewModel.switchLaunchMethod(instance, to: method)
         } catch {
             exportError = error.localizedDescription
         }
     }
 
-    private func switchToNoSingleton() async {
+    private func rebuildClone() async {
         isSwitchingLaunchMethod = true
         defer { isSwitchingLaunchMethod = false }
         do {
-            try await viewModel.switchLaunchMethod(instance, toTrampoline: false, noSingleton: true)
-        } catch {
-            exportError = error.localizedDescription
-        }
-    }
-
-    private func switchToDirectLaunch() async {
-        isSwitchingLaunchMethod = true
-        defer { isSwitchingLaunchMethod = false }
-        do {
-            try await viewModel.switchLaunchMethod(instance, toTrampoline: false, noSingleton: false)
+            try await viewModel.rebuildClone(instance)
         } catch {
             exportError = error.localizedDescription
         }
