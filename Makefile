@@ -8,7 +8,9 @@ DERIVED_DATA := $(CURDIR)/build
 APP_NAME     := PluralMac.app
 APP_BUNDLE   := $(DERIVED_DATA)/Build/Products/$(CONFIGURATION)/$(APP_NAME)
 INSTALL_DIR  := /Applications
-SIGN_IDENTITY := Apple Development: nightmaremindz@gmail.com (UF98E359JX)
+# Defaults to this machine's first "Apple Development" identity; ad-hoc "-" if none.
+# Override: make build SIGN_IDENTITY="Apple Development: you@example.com (TEAMID)"
+SIGN_IDENTITY ?= $(or $(shell security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -n 1),-)
 
 # Version from latest git tag (e.g. v1.2.0 → 1.2.0), fallback to 0.1.0
 VERSION      := $(shell git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo 0.1.0)
